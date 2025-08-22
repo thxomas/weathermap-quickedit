@@ -26,6 +26,7 @@ Currently it can :
 - cd into it
 - add your .conf files into the `configs/` directory (`map.conf` is loaded by default at start)
 - add some pictures/icons into `images/` directory
+- install nodejs if not already present
 - start the server `node server.js`
 - Connect to http://localhost:3000
 - Have fun !
