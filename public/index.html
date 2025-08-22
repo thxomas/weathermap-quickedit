@@ -1,0 +1,499 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Weathermap QuickEdit</title>
+
+</head>
+<body>
+  <link rel="stylesheet" href="index.css">
+<div id="topMenu">
+  <select id="configSelector"></select>
+  <button id="openBtn">📂 Open</button>
+  <button id="saveBtn">💾 Save</button>
+  <span style="margin-left:20px;">Weathermap QuickEdit beta</span>
+</div>
+<div style="opacity: 0;"><svg id="buffer"></svg></div>
+<svg id="map"></svg>
+<div id="tooltip" style="white-space: pre;position:absolute; display:none; background:#fff; border:1px solid #333; padding:4px 8px; font-size:12px; pointer-events:none; z-index:100;"></div>
+<div id="propertiesWindow" style="display:none; position:absolute; top:100px; left:100px; min-width:220px; background:#fff; border:2px solid #0074D9; border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,0.12); z-index:900;">
+  <div id="propertiesHeader" style="cursor:move; background:#0074D9; color:#fff; padding:8px; border-radius:8px 8px 0 0;">
+    Node Properties
+    <button id="closePropertiesBtn" style="float:right; background:none; border:none; color:#fff; font-size:16px; cursor:pointer;">×</button>
+  </div>
+  <div id="propertiesContent" style="padding:12px;"></div>
+</div>
+<script>
+let mapData = null;
+let dragging = null;
+const imgsizes = []; // to store preloaded icon sizes
+
+// Preload image and return a Promise that resolves when loaded
+async function preloadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.crossOrigin = 'Anonymous' // to avoid CORS if used with Canvas
+    img.src = src
+    img.onload = () => {
+      resolve({ src, width: img.naturalWidth, height: img.naturalHeight })
+    }
+    img.onerror = e => {
+      reject(e)
+    }
+  })
+}
+
+async function fetchConfigFiles() {
+  const res = await fetch('/config-files');
+  const files = await res.json();
+  const selector = document.getElementById('configSelector');
+  selector.innerHTML = '';
+  files.forEach(file => {
+    const option = document.createElement('option');
+    option.value = file;
+    option.textContent = file;
+    selector.appendChild(option);
+  });
+}
+
+async function preloadNodeIconsAndSizes() {
+  const nodeslist = Object.values(mapData.nodes || {});
+  // Get unique icon filenames
+  const iconFiles = [...new Set(nodeslist.map(node => node.icon))];
+  for (const file of iconFiles) {
+    try {
+      const imgInfo = await preloadImage(`${file}`);
+      imgsizes.push(imgInfo);
+    } catch (e) {
+      console.warn('Failed to load', file);
+    }
+  }
+}
+
+function getEndpointWithOffset(endpoint) { // endpoint as Array
+  // endpoint: [nodeName, offsetStr?]
+  const nodeName = endpoint[0];
+  const offsetStr = endpoint[1];
+  const node = mapData.nodes[nodeName];
+  if (!node || !node.position) return { x: 0, y: 0 };
+  if (!offsetStr) return { x: node.position.x, y: node.position.y };
+  const directions_x = { 'N':0, 'NE':1, 'E':1, 'SE':1, 'S':0, 'SW':-1, 'W':-1, 'NW':-1 };
+  const directions_y = { 'N':-1, 'NE':-1, 'E':0, 'SE':1, 'S':1, 'SW':1, 'W':0, 'NW':-1 };
+  const offset = offsetStr.split(/([+-]?\d+)/).filter(Boolean);
+  const iconWidth = imgsizes.find(img => img.src.endsWith(node.icon))?.width || 0;
+  const iconHeight = imgsizes.find(img => img.src.endsWith(node.icon))?.height || 0;
+  const x = node.position.x + (directions_x[offset[0]] || 0) * (parseInt(offset[1]) || 0) * iconWidth / 200;
+  const y = node.position.y + (directions_y[offset[0]] || 0) * (parseInt(offset[1]) || 0) * iconHeight / 200;
+  return { x, y };
+}
+
+function getEndpointOffset(endpoint) { // endpoint as String
+  // endpoint: [nodeName, offsetStr?]
+  if (typeof endpoint === 'string') {
+    endpoint = endpoint.split(':');
+  } 
+  const nodeName = endpoint[0];
+  offsetStr = endpoint[1];
+  const node = mapData.nodes[nodeName];
+  if (!node || !node.position) return { x: 0, y: 0 };
+  if (!offsetStr) {
+    // if no offset, return node position
+    return { x: 0, y: 0 };
+  }
+  const directions_x = { 'N':0, 'NE':1, 'E':1, 'SE':1, 'S':0, 'SW':-1, 'W':-1, 'NW':-1 };
+  const directions_y = { 'N':-1, 'NE':-1, 'E':0, 'SE':1, 'S':1, 'SW':1, 'W':0, 'NW':-1 };
+  const offset = offsetStr.split(/([+-]?\d+)/).filter(Boolean);
+  const iconWidth = imgsizes.find(img => img.src.endsWith(node.icon))?.width || 0;
+  const iconHeight = imgsizes.find(img => img.src.endsWith(node.icon))?.height || 0;
+  const x = (directions_x[offset[0]] || 0) * (parseInt(offset[1]) || 0) * iconWidth / 200;
+  const y = (directions_y[offset[0]] || 0) * (parseInt(offset[1]) || 0) * iconHeight / 200;
+  return { x, y };
+}
+
+function showPropertiesWindow(obj, title = "Properties") {
+  if (!obj) return;
+  const win = document.getElementById('propertiesWindow');
+  const content = document.getElementById('propertiesContent');
+  const header = document.getElementById('propertiesHeader');
+  content.innerHTML = '';
+  header.childNodes[0].textContent = title; // Set window title
+
+  Object.entries(obj).forEach(([key, value]) => {
+    const row = document.createElement('div');
+    row.style.marginBottom = '6px';
+    const label = document.createElement('span');
+    label.textContent = key + ': ';
+    label.style.fontWeight = 'bold';
+    row.appendChild(label);
+
+    const input = document.createElement('input');
+    input.value = typeof value === 'object' ? JSON.stringify(value) : value;
+    input.style.width = '120px';
+    // input readonly
+    input.setAttribute('readonly', 'readonly');
+    input.dataset.key = key;
+    /*input.onchange = function() {
+      try {
+        obj[key] = JSON.parse(this.value);
+      } catch {
+        obj[key] = this.value;
+      }
+    };*/
+    row.appendChild(input);
+    content.appendChild(row);
+  });
+  win.style.display = 'block';
+  win.style.left = '100px';
+  win.style.top = '100px';
+}
+
+// Show properties window on node click
+function addNodeClickProperties(nodes) {
+  Object.entries(nodes).forEach(([name, props]) => {
+    const g = document.getElementById('map').getElementById(name);
+    if (g) {
+      g.addEventListener('click', function(e) {
+        e.stopPropagation();
+        showPropertiesWindow(mapData.nodes[name], "Node Properties: " + name);
+      });
+    }
+  });
+}
+
+// Show properties window on link click
+function addLinkClickProperties(links) {
+  Object.entries(links).forEach(([name, props]) => {
+    const g = document.getElementById('map').getElementById(name);
+    if (g) {
+      g.addEventListener('click', function(e) {
+        e.stopPropagation();
+        showPropertiesWindow(mapData.links[name], "Link Properties: " + name);
+      });
+    }
+  });
+}
+
+async function LoadAndDraw() {
+  await Load();
+  if (mapData) {
+    Draw();
+  } else {
+    document.body.textContent = 'Erreur: données de la carte non chargées.';
+  }  
+}
+
+async function Load() {
+  const res = await fetch('/map.json');
+  if (!res.ok) {
+    document.body.textContent = 'Erreur: ' + (await res.text());
+    return;
+  }
+  mapData = await res.json();
+}
+async function Draw() {
+
+  await preloadNodeIconsAndSizes();
+
+  const svg = document.getElementById('map');
+  svg.innerHTML = ''; // clear
+
+  const nodes = mapData.nodes || {};
+  const links = mapData.links || {};
+
+  const svg_width = mapData.globals.filter(obj=>obj.key==='WIDTH')[0].value;
+  const svg_height = mapData.globals.filter(obj=>obj.key==='HEIGHT')[0].value;  
+  svg.style.width = svg_width+"px";
+  svg.style.height = svg_height+"px";
+
+  // display background image if exists
+  if (mapData.globals.filter(obj=>obj.key==='BACKGROUND')[0]) {
+    const bgImage = mapData.globals.filter(obj=>obj.key==='BACKGROUND')[0].value;
+    const bg = document.createElementNS('http://www.w3.org/2000/svg','image');
+    bg.setAttribute('href', bgImage);
+    svg.appendChild(bg);
+  }
+
+  // create a layer for vias
+  const vialayer = document.createElementNS('http://www.w3.org/2000/svg','g');
+  vialayer.setAttribute('class', 'vias');
+
+  // draw links
+  Object.entries(links).forEach(([name, props]) => {
+  let a = props.endpoint_a, b = props.endpoint_b;
+  if (!a || !b) return;
+  const na = nodes[a[0]], nb = nodes[b[0]];
+  if (!na || !nb || !na.position || !nb.position) return;
+  
+  // Build link path : start → vias → end
+  const points = []; 
+
+  endpoint = getEndpointWithOffset(a); // get endpoint and offset
+  points.push(`${endpoint.x},${endpoint.y}`); // starting point with offset
+  
+  if (props.vias && props.vias.length) {
+    var viaindex = 1;
+    props.vias.forEach(v => {
+      points.push(`${v.x},${v.y}`);
+
+      const vianchor = document.createElementNS('http://www.w3.org/2000/svg','circle');
+      const x = v.x, y = v.y;
+      const w = 12, h = 12;
+      vianchor.setAttribute('id',`${name}#${viaindex}`);
+      vianchor.setAttribute('cx', x);
+      vianchor.setAttribute('cy', y);
+      vianchor.setAttribute('r', 6);
+      vianchor.setAttribute('class', 'via');
+      vianchor.setAttribute('style', "fill:#777;stroke:#0;stroke-width:1");
+
+      vianchor.addEventListener('mouseover', (e) => {
+        e.stopPropagation(); // prevent dragging nodes
+        const tooltip = document.getElementById('tooltip');
+        tooltip.textContent = `Via ${e.target.id}: ${e.target.cx.baseVal.value},${e.target.cy.baseVal.value}`;
+        tooltip.style.left = (e.pageX + 10) + 'px';
+        tooltip.style.top = (e.pageY + 10) + 'px';
+        tooltip.style.display = 'block';
+      });
+
+      vianchor.addEventListener('mouseout', (e) => {
+        document.getElementById('tooltip').style.display = 'none'; // hide tooltip
+      });
+
+      vianchor.addEventListener('mousedown', (e) => {
+        e.stopPropagation(); // prevent dragging nodes
+        dragging = { name: e.target.id, offsetX: e.offsetX, offsetY: e.offsetY, w, h, draggedtype: 'via' };
+      });
+      vialayer.appendChild(vianchor);
+      viaindex++;
+    });
+  }
+  
+  endpoint = getEndpointWithOffset(b); // get endpoint and offset
+  points.push(`${endpoint.x},${endpoint.y}`); // starting point with offset
+
+  const poly = document.createElementNS('http://www.w3.org/2000/svg','polyline');
+  poly.setAttribute('points', points.join(' '));
+  poly.setAttribute('style', "fill:none;stroke:#CCCCCC;stroke-width:8");
+  poly.setAttribute('class', 'link');
+  poly.setAttribute('id',name);
+  poly.setAttribute('endpoint_a',`${a[0]}${a[1] ? ':'+a[1] : ''}`);
+  poly.setAttribute('endpoint_b',`${b[0]}${b[1] ? ':'+b[1] : ''}`);
+
+  poly.addEventListener('mouseover', (e) => {
+    //e.stopPropagation(); // prevent dragging nodes
+    if (dragging) return; // don't highlight if dragging
+    //dragging = { name, offsetX: e.offsetX, offsetY: e.offsetY };
+    e.target.style.stroke = '#FF4136'; // highlight link
+      const tooltip = document.getElementById('tooltip');
+      tooltip.textContent = `Link ${name}: ${a[0]} → ${b[0]}`;
+      if (props.vias && props.vias.length) {
+        tooltip.textContent += `\r\n VIAs:\r\n ${props.vias.map(v => `(${v.x},${v.y})`).join('\r\n ')}`;
+      }
+      tooltip.style.left = (e.pageX + 10) + 'px';
+      tooltip.style.top = (e.pageY + 10) + 'px';
+      tooltip.style.display = 'block';
+    });
+    poly.addEventListener('mouseout', (e) => {
+    e.target.style.stroke = '#CCCCCC'; // highlight link
+    document.getElementById('tooltip').style.display = 'none'; // hide tooltip
+  });
+  
+  svg.appendChild(poly);
+  });
+  svg.appendChild(vialayer);
+
+  // draw nodes
+  buffer = document.getElementById('buffer');  // use buffer SVG to measure label size
+  Object.entries(nodes).forEach(([name, props]) => {
+    const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+    g.setAttribute('class','node');
+    g.setAttribute('id',name);    
+    const x = props.position?.x || 50;
+    const y = props.position?.y || 50;
+    var w = props.width ? parseInt(props.width) : 80;
+    var h = props.height ? parseInt(props.height) : 16;
+
+    // display node icon if exists
+    if (props.icon) {
+      // get preloaded image dimensions
+      const iconWidth = imgsizes.find(img => img.src.endsWith(props.icon))?.width || w;
+      const iconHeight = imgsizes.find(img => img.src.endsWith(props.icon))?.height || h;
+
+      // create SVG image element      
+      const icon = document.createElementNS('http://www.w3.org/2000/svg','image');
+      icon.setAttribute('href', `/${props.icon}`);
+
+      icon.setAttribute('x', x - iconWidth/2);
+      icon.setAttribute('y', y - iconHeight/2);
+      icon.setAttribute('width', iconWidth);
+      icon.setAttribute('height', iconHeight);
+      g.appendChild(icon);
+    }
+    // display label if exists
+    if (props.label) {
+      
+      // if label has offset, split it
+        var offset_x = 0, offset_y =0; 
+        if (props.labeloffset) {
+        // split label offset into words
+        let offset = props.labeloffset.split(" ").filter(Boolean);
+
+
+        if (offset.length > 1) {
+          
+          offset_x = parseInt(offset[0]) || 0;
+          offset_y = parseInt(offset[1]) || 0;
+        }
+      }
+      // create SVG label bounding box
+      const rect = document.createElementNS('http://www.w3.org/2000/svg','rect');
+      rect.setAttribute('id','rect');
+
+      // create SVG text element for label
+      const label = document.createElementNS('http://www.w3.org/2000/svg','text');
+      label.setAttribute('x', x + offset_x);
+      label.setAttribute('y', y + offset_y);
+      label.setAttribute('class', 'label');
+
+      label.textContent = props.label || name;
+
+      g.appendChild(rect);
+      
+      
+      buffer.appendChild(label); 
+      labelBox = label.getBBox();
+      label.remove(); // remove from buffer, we only need the size
+      g.appendChild(label);  
+      // adjust rect width to fit label
+      const labelPaddingW = 6; const labelPaddingH = 2// padding around label
+      w = labelBox.width + labelPaddingW;
+      h = labelBox.height + labelPaddingH; 
+      rect.setAttribute('x', x - w/2 + offset_x);
+      rect.setAttribute('y', y - h/2 + offset_y);
+      rect.setAttribute('width', w); // add some padding
+      rect.setAttribute('height', h); // keep height from props
+
+      rect.addEventListener('mousedown', (e) => {
+        dragging = { name, offsetX: e.offsetX , offsetY: e.offsetY , w , h, draggedtype: 'node' };
+      });
+
+    }
+    svg.appendChild(g);
+  });
+  buffer.innerHTML = ""; // clear buffer after measuring boxes
+  // Add click properties to nodes and links
+  addNodeClickProperties(nodes);
+  addLinkClickProperties(links);
+}
+
+document.addEventListener('mousemove', (e) => {
+  if (!dragging) return;
+  const svg = document.getElementById('map');
+  const svgnode = svg.getElementById(dragging.name);
+
+  switch (dragging.draggedtype) {
+    case 'via':
+      // update via position
+      const via = svgnode;
+      var newX = e.offsetX ;//- dragging.w/2 ;//+ dragging.offsetX;
+      var newY = e.offsetY ;//- dragging.h/2 ;//+ dragging.offsetY;
+      via.setAttribute('cx', newX);
+      via.setAttribute('cy', newY);
+      // redraw related links
+      var linkFilter = '[id="' + dragging.name.split('#')[0] + '"]';
+      var links = svg.querySelectorAll(linkFilter);
+      links.forEach( (poly) => {
+        const points = poly.points;
+      
+        const viaIndex = dragging.name.split('#')[1]; // get via index from id
+        if (points.length > viaIndex) {
+          points[viaIndex].x = newX ; // update via point
+          points[viaIndex].y = newY ;
+        }
+      });
+      //update mapData
+      const linkName = dragging.name.split('#')[0];
+      if (mapData.links[linkName]) {
+        const viaIndex = parseInt(dragging.name.split('#')[1]) - 1; // convert to zero-based index
+        if (!mapData.links[linkName].vias) { return ;} // ensure vias exist
+        if (mapData.links[linkName].vias.length > viaIndex) {
+          mapData.links[linkName].vias[viaIndex].x = newX ;
+          mapData.links[linkName].vias[viaIndex].y = newY ;   
+        }
+      }
+      break;
+    case 'node':
+      // update node position
+      const node = mapData.nodes[dragging.name];
+      var newX = e.offsetX //- dragging.w/2 ;//+ dragging.offsetX;
+      var newY = e.offsetY //- dragging.h/2 ;//+ dragging.offsetY;
+      node.position = { x: newX , y: newY  };
+      // redraw node
+      // check if node has icon
+      if (node.icon) {
+        svgnode.childNodes[0].setAttribute('x', newX - imgsizes.find(img => img.src.endsWith(node.icon))?.width / 2 );
+        svgnode.childNodes[0].setAttribute('y', newY - imgsizes.find(img => img.src.endsWith(node.icon))?.height / 2 );
+        svgnode.childNodes[1].setAttribute('x', newX - dragging.w/2);
+        svgnode.childNodes[1].setAttribute('y', newY - dragging.h/2);
+        svgnode.childNodes[2].setAttribute('x', newX );
+        svgnode.childNodes[2].setAttribute('y', newY );
+      } else {
+        svgnode.childNodes[0].setAttribute('x', newX - dragging.w/2);
+        svgnode.childNodes[0].setAttribute('y', newY - dragging.h/2);
+        svgnode.childNodes[1].setAttribute('x', newX  );
+        svgnode.childNodes[1].setAttribute('y', newY  );
+      }
+
+      //redraw related links
+      var linkFilter = '[endpoint_a="' + dragging.name +'"],[endpoint_a^="' + dragging.name +':"]';
+      var links = svg.querySelectorAll(linkFilter);
+      links.forEach( (poly) => { 
+        endpoint_name = poly.getAttribute('endpoint_a');
+        endpoint_offset = getEndpointOffset(endpoint_name);
+        poly.points[0].x=newX+endpoint_offset.x;
+        poly.points[0].y=newY+endpoint_offset.y; 
+      });
+
+      linkFilter = '[endpoint_b="' + dragging.name +'"],[endpoint_b^="' + dragging.name +':"]';
+      links = svg.querySelectorAll(linkFilter);
+      links.forEach( (poly) => { 
+        endpoint_name = poly.getAttribute('endpoint_b');
+        endpoint_offset = getEndpointOffset(endpoint_name); 
+        poly.points[poly.points.length-1].x=newX + endpoint_offset.x ;
+        poly.points[poly.points.length-1].y=newY + endpoint_offset.y ; 
+      });
+      break;
+  }
+
+  //loadAndDraw(); // redraw
+});
+
+document.addEventListener('mouseup', () => { dragging = null; });
+
+document.getElementById('openBtn').addEventListener('click', async () => {
+  const selector = document.getElementById('configSelector');
+  const file = selector.value;
+  if (!file) return;
+  const res = await fetch(`/load-config?file=${encodeURIComponent(file)}`);
+  mapData = await res.json();
+  Draw();
+});
+
+document.getElementById('saveBtn').addEventListener('click', async () => {
+  const res = await fetch('/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(mapData)
+  });
+  if (res.ok) {
+    alert('Configuration sauvegardée.');
+  } else {
+    alert('Erreur sauvegarde: ' + await res.text());
+  }
+});
+
+
+fetchConfigFiles();
+LoadAndDraw();
+</script>
+</body>
+</html>
