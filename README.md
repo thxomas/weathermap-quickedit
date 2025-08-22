@@ -21,7 +21,7 @@ Currently it can :
 - Move Nodes and Vias by dragging them
 - Display object properties (readonly)
 - Save the .conf file, preserving unedited/unsupported properties
-#What Not ?
+#W hat Not ?
 - The editor cannot create new objects
 - The tool is not (yet) integrated with Cacti as a plugin
 # How to try ?
