@@ -1,5 +1,8 @@
 # weathermap-quickedit
-A modern quick editor for existing Network Weathermap. Allows moving nodes and vias and editing basic properties.
+A modern quick editor for existing Network Weathermap. Allows moving nodes and vias and editing basic properties.\
+\
+<img width="1028" height="761" alt="image" src="https://github.com/user-attachments/assets/864162a1-8289-4ee3-b13c-faac969355ec" />
+
 # Why ?
 [Network Weathermap](http://www.network-weathermap.com/) by Howard Jones is a popular tool among telcos, netadmins and sysadmins to display monitoring data in an efficient way whether standalone or integrated with Cacti.
 However the editor included with the tool has limitations when maps go big.
