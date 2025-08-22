@@ -26,7 +26,6 @@ Currently it can :
 - The tool is not (yet) integrated with Cacti as a plugin
 # How to try ?
 - Clone the repository
-- cd into it
 - add your .conf files into the `configs/` directory (`map.conf` is loaded by default at start)
 - add some pictures/icons into `images/` directory
 - install nodejs if not already present
