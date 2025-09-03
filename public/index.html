@@ -8,13 +8,25 @@
 <body>
   <link rel="stylesheet" href="index.css">
 <div id="topMenu">
+  <span style="margin-right:20px; font-weight: bold;">Weathermap QuickEdit</span>
+  <span style="">Config file : </span>
   <select id="configSelector"></select>
+  &nbsp;
   <button id="openBtn">📂 Open</button>
   <button id="saveBtn">💾 Save</button>
-  <span style="margin-left:20px;">Weathermap QuickEdit beta</span>
+  <input type="checkbox" id="gridEnabled" value="true" checked />&nbsp;<button>Grid&nbsp;<input type="number" id="gridSizeInput" value="40" min="10" max="200" style="width:60px;"></button>
+  <button id="selectModeBtn">Select Mode</button>
+  
 </div>
-<div style="opacity: 0;"><svg id="buffer"></svg></div>
-<svg id="map"></svg>
+
+<svg id="map">
+    <defs>
+    <g id="xmarker">
+      <line x1="-4" y1="-4" x2="4" y2="4" stroke="#555555" stroke-width="1"/>
+      <line x1="-4" y1="4" x2="4" y2="-4" stroke="#555555" stroke-width="1"/>
+    </g>
+  </defs>
+</svg>
 <div id="tooltip" style="white-space: pre;position:absolute; display:none; background:#fff; border:1px solid #333; padding:4px 8px; font-size:12px; pointer-events:none; z-index:100;"></div>
 <div id="propertiesWindow" style="display:none; position:absolute; top:100px; left:100px; min-width:220px; background:#fff; border:2px solid #0074D9; border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,0.12); z-index:900;">
   <div id="propertiesHeader" style="cursor:move; background:#0074D9; color:#fff; padding:8px; border-radius:8px 8px 0 0;">
@@ -23,10 +35,18 @@
   </div>
   <div id="propertiesContent" style="padding:12px;"></div>
 </div>
+<div style="opacity: 0;"><svg id="buffer"></svg></div>
 <script>
 let mapData = null;
 let dragging = null;
+let gridSize = 32; // You can make this configurable via UI
+let snapToGridEnabled = false; // You can make this configurable via UI
 const imgsizes = []; // to store preloaded icon sizes
+const labelsizes = []; // to store text label sizes
+
+let selectMode = false;
+let selectedNodes = new Set();
+let multiDrag = null; // for multi-node dragging
 
 // Preload image and return a Promise that resolves when loaded
 async function preloadImage(src) {
@@ -68,6 +88,77 @@ async function preloadNodeIconsAndSizes() {
       console.warn('Failed to load', file);
     }
   }
+}
+
+function drawGridLayer(svg, width, height, gridSize) {
+  // Remove old grid if exists
+  const oldGrid = svg.querySelector('.gridlayer');
+  if (oldGrid) oldGrid.remove();
+
+  const gridLayer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  gridLayer.setAttribute('class', 'gridlayer');
+
+  for (let x = 0; x < width; x += gridSize) {
+    for (let y = 0; y < height; y += gridSize) {
+      const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      dot.setAttribute('cx', x);
+      dot.setAttribute('cy', y);
+      dot.setAttribute('r', 2);
+      dot.setAttribute('fill', '#ddd');
+      gridLayer.appendChild(dot);
+    }
+  }
+  svg.appendChild(gridLayer);
+}
+
+function snapToGrid(val, gridSize) {
+  return Math.round(val / gridSize) * gridSize;
+}
+
+function addLinkMidMarker(svg, points, linkName, updateOnly = false) {
+  // points: array of {x, y}
+  // 1. Calculate total length
+  let totalLength = 0;
+  for (let i = 1; i < points.length; i++) {
+    const dx = points[i].x - points[i-1].x;
+    const dy = points[i].y - points[i-1].y;
+    totalLength += Math.sqrt(dx*dx + dy*dy);
+  }
+  // 2. Find midpoint position
+  let halfLength = totalLength / 2;
+  let accLength = 0;
+  let mid = {x: points[0].x, y: points[0].y};
+  for (let i = 1; i < points.length; i++) {
+    const dx = points[i].x - points[i-1].x;
+    const dy = points[i].y - points[i-1].y;
+    const segLength = Math.sqrt(dx*dx + dy*dy);
+    if (accLength + segLength >= halfLength) {
+      const ratio = (halfLength - accLength) / segLength;
+      mid.x = points[i-1].x + dx * ratio;
+      mid.y = points[i-1].y + dy * ratio;
+      break;
+    }
+    accLength += segLength;
+  }
+  // 3. Draw marker
+  if (!updateOnly) {
+    // Draw a new marker
+    const marker = document.createElementNS('http://www.w3.org/2000/svg','use');
+    marker.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', '#xmarker');
+    marker.setAttribute('x', mid.x);
+    marker.setAttribute('y', mid.y);
+    marker.setAttribute('class', 'link-mid-marker');
+    marker.setAttribute('id', linkName + '_midmarker');
+    svg.appendChild(marker);
+  } else {
+    const existingMarker = svg.getElementById(linkName + '_midmarker');
+    if (existingMarker) {
+      existingMarker.setAttribute('x', mid.x);
+      existingMarker.setAttribute('y', mid.y);
+      return;
+    }
+  }
+
 }
 
 function getEndpointWithOffset(endpoint) { // endpoint as Array
@@ -154,7 +245,17 @@ function addNodeClickProperties(nodes) {
     if (g) {
       g.addEventListener('click', function(e) {
         e.stopPropagation();
-        showPropertiesWindow(mapData.nodes[name], "Node Properties: " + name);
+        if (selectMode) {
+          if (selectedNodes.has(name)) {
+            selectedNodes.delete(name);
+            g.classList.remove('selected-node');
+          } else {
+            selectedNodes.add(name);
+            g.classList.add('selected-node');
+          }
+        } else {
+          showPropertiesWindow(mapData.nodes[name], "Node Properties: " + name);
+        }
       });
     }
   });
@@ -195,7 +296,7 @@ async function Draw() {
   await preloadNodeIconsAndSizes();
 
   const svg = document.getElementById('map');
-  svg.innerHTML = ''; // clear
+  //svg.innerHTML = ''; // clear
 
   const nodes = mapData.nodes || {};
   const links = mapData.links || {};
@@ -213,6 +314,9 @@ async function Draw() {
     svg.appendChild(bg);
   }
 
+  // draw grid layer
+  drawGridLayer(svg, svg_width, svg_height, gridSize);
+
   // create a layer for vias
   const vialayer = document.createElementNS('http://www.w3.org/2000/svg','g');
   vialayer.setAttribute('class', 'vias');
@@ -226,14 +330,17 @@ async function Draw() {
   
   // Build link path : start → vias → end
   const points = []; 
+  const pointsArray = []; // for mid marker calculation
 
   endpoint = getEndpointWithOffset(a); // get endpoint and offset
   points.push(`${endpoint.x},${endpoint.y}`); // starting point with offset
-  
+  pointsArray.push({x: endpoint.x, y: endpoint.y});
+
   if (props.vias && props.vias.length) {
     var viaindex = 1;
     props.vias.forEach(v => {
       points.push(`${v.x},${v.y}`);
+      pointsArray.push({x: v.x, y: v.y});
 
       const vianchor = document.createElementNS('http://www.w3.org/2000/svg','circle');
       const x = v.x, y = v.y;
@@ -269,6 +376,7 @@ async function Draw() {
   
   endpoint = getEndpointWithOffset(b); // get endpoint and offset
   points.push(`${endpoint.x},${endpoint.y}`); // starting point with offset
+  pointsArray.push({x: endpoint.x, y: endpoint.y});
 
   const poly = document.createElementNS('http://www.w3.org/2000/svg','polyline');
   poly.setAttribute('points', points.join(' '));
@@ -296,9 +404,11 @@ async function Draw() {
     e.target.style.stroke = '#CCCCCC'; // highlight link
     document.getElementById('tooltip').style.display = 'none'; // hide tooltip
   });
+
   
   svg.appendChild(poly);
-  });
+  addLinkMidMarker(svg, pointsArray, name);
+});
   svg.appendChild(vialayer);
 
   // draw nodes
@@ -365,8 +475,11 @@ async function Draw() {
       g.appendChild(label);  
       // adjust rect width to fit label
       const labelPaddingW = 6; const labelPaddingH = 2// padding around label
-      w = labelBox.width + labelPaddingW;
+      w = labelBox.width + labelPaddingW; 
       h = labelBox.height + labelPaddingH; 
+      labelsizes.push({ name, width: w, height: h });
+
+
       rect.setAttribute('x', x - w/2 + offset_x);
       rect.setAttribute('y', y - h/2 + offset_y);
       rect.setAttribute('width', w); // add some padding
@@ -385,17 +498,79 @@ async function Draw() {
   addLinkClickProperties(links);
 }
 
-document.addEventListener('mousemove', (e) => {
-  if (!dragging) return;
+document.addEventListener('mousemove', function(e) {             // Dragging multiple selected nodes
+  if (!multiDrag) return;
+  const svg = document.getElementById('map');
+  const dx = e.clientX - multiDrag.startX;
+  const dy = e.clientY - multiDrag.startY;
+  multiDrag.nodes.forEach(n => {
+    // Snap if enabled
+    let newX = snapToGridEnabled ? snapToGrid(n.x + dx, gridSize) : n.x + dx;
+    let newY = snapToGridEnabled ? snapToGrid(n.y + dy, gridSize) : n.y + dy;
+    mapData.nodes[n.name].position.x = newX;
+    mapData.nodes[n.name].position.y = newY;
+    // Update SVG node position
+    const g = svg.getElementById(n.name);
+    if (g) {
+      // If icon, update icon and label positions
+      const node = mapData.nodes[n.name];
+      if (node.icon) {
+        g.childNodes[0].setAttribute('x', newX - imgsizes.find(img => img.src.endsWith(node.icon))?.width / 2 );
+        g.childNodes[0].setAttribute('y', newY - imgsizes.find(img => img.src.endsWith(node.icon))?.height / 2 );
+        g.childNodes[1].setAttribute('x', newX - labelsizes.find(lab => lab.name.endsWith(n.name))?.width / 2 ); 
+        g.childNodes[1].setAttribute('y', newY - labelsizes.find(lab => lab.name.endsWith(n.name))?.height / 2);
+        g.childNodes[2].setAttribute('x', newX );
+        g.childNodes[2].setAttribute('y', newY );
+      } else {
+        g.childNodes[0].setAttribute('x', newX - labelsizes.find(lab => lab.name.endsWith(n.name))?.width / 2);
+        g.childNodes[0].setAttribute('y', newY - labelsizes.find(lab => lab.name.endsWith(n.name))?.height / 2);
+        g.childNodes[1].setAttribute('x', newX );
+        g.childNodes[1].setAttribute('y', newY );
+      }
+    }
+
+  // Optionally, redraw links here if needed
+      var linkFilter = '[endpoint_a="' + n.name +'"],[endpoint_a^="' + n.name +':"]';
+      var links = svg.querySelectorAll(linkFilter);
+      links.forEach( (poly) => { 
+        endpoint_name = poly.getAttribute('endpoint_a');
+        endpoint_offset = getEndpointOffset(endpoint_name);
+        poly.points[0].x=newX+endpoint_offset.x;
+        poly.points[0].y=newY+endpoint_offset.y; 
+        addLinkMidMarker(svg, Array.from(poly.points).map(p => ({x: p.x, y: p.y})), poly.id, true);
+      });
+
+      linkFilter = '[endpoint_b="' + n.name +'"],[endpoint_b^="' + n.name +':"]';
+      links = svg.querySelectorAll(linkFilter);
+      links.forEach( (poly) => { 
+        endpoint_name = poly.getAttribute('endpoint_b');
+        endpoint_offset = getEndpointOffset(endpoint_name); 
+        poly.points[poly.points.length-1].x=newX + endpoint_offset.x ;
+        poly.points[poly.points.length-1].y=newY + endpoint_offset.y ; 
+        addLinkMidMarker(svg, Array.from(poly.points).map(p => ({x: p.x, y: p.y})), poly.id, true);
+      });
+  });
+});
+
+document.addEventListener('mousemove', (e) => {         // Simple dragging of single via or node
+  ///////////////////////////////////////////////////////////////
+  // Simple dragging of single via or node
+  ///////////////////////////////////////////////////////////////
+
+  if (!dragging || multiDrag) return;
   const svg = document.getElementById('map');
   const svgnode = svg.getElementById(dragging.name);
+
+  // Alt disables grid snapping
+  const snap = snapToGridEnabled && !e.ctrlKey;
 
   switch (dragging.draggedtype) {
     case 'via':
       // update via position
       const via = svgnode;
-      var newX = e.offsetX ;//- dragging.w/2 ;//+ dragging.offsetX;
-      var newY = e.offsetY ;//- dragging.h/2 ;//+ dragging.offsetY;
+      var newX = snap ? snapToGrid(e.offsetX, gridSize) : e.offsetX;
+      var newY = snap ? snapToGrid(e.offsetY, gridSize) : e.offsetY;
+
       via.setAttribute('cx', newX);
       via.setAttribute('cy', newY);
       // redraw related links
@@ -408,6 +583,7 @@ document.addEventListener('mousemove', (e) => {
         if (points.length > viaIndex) {
           points[viaIndex].x = newX ; // update via point
           points[viaIndex].y = newY ;
+          addLinkMidMarker(svg, Array.from(points).map(p => ({x: p.x, y: p.y})), poly.id, true);
         }
       });
       //update mapData
@@ -424,8 +600,9 @@ document.addEventListener('mousemove', (e) => {
     case 'node':
       // update node position
       const node = mapData.nodes[dragging.name];
-      var newX = e.offsetX //- dragging.w/2 ;//+ dragging.offsetX;
-      var newY = e.offsetY //- dragging.h/2 ;//+ dragging.offsetY;
+      var newX = snap ? snapToGrid(e.offsetX, gridSize) : e.offsetX;
+      var newY = snap ? snapToGrid(e.offsetY, gridSize) : e.offsetY;
+
       node.position = { x: newX , y: newY  };
       // redraw node
       // check if node has icon
@@ -451,6 +628,7 @@ document.addEventListener('mousemove', (e) => {
         endpoint_offset = getEndpointOffset(endpoint_name);
         poly.points[0].x=newX+endpoint_offset.x;
         poly.points[0].y=newY+endpoint_offset.y; 
+        addLinkMidMarker(svg, Array.from(poly.points).map(p => ({x: p.x, y: p.y})), poly.id, true);
       });
 
       linkFilter = '[endpoint_b="' + dragging.name +'"],[endpoint_b^="' + dragging.name +':"]';
@@ -460,6 +638,7 @@ document.addEventListener('mousemove', (e) => {
         endpoint_offset = getEndpointOffset(endpoint_name); 
         poly.points[poly.points.length-1].x=newX + endpoint_offset.x ;
         poly.points[poly.points.length-1].y=newY + endpoint_offset.y ; 
+        addLinkMidMarker(svg, Array.from(poly.points).map(p => ({x: p.x, y: p.y})), poly.id, true);
       });
       break;
   }
@@ -467,7 +646,7 @@ document.addEventListener('mousemove', (e) => {
   //loadAndDraw(); // redraw
 });
 
-document.addEventListener('mouseup', () => { dragging = null; });
+document.addEventListener('mouseup', () => { dragging = null; multiDrag = null;});
 
 document.getElementById('openBtn').addEventListener('click', async () => {
   const selector = document.getElementById('configSelector');
@@ -491,6 +670,44 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
   }
 });
 
+document.getElementById('selectModeBtn').addEventListener('click', function() {
+  selectMode = !selectMode;
+  this.style.background = selectMode ? '#FFDC00' : '';
+  // Optionally clear selection when leaving select mode
+  if (!selectMode) {
+    selectedNodes.forEach(name => {
+      const g = document.getElementById('map').getElementById(name);
+      if (g) g.classList.remove('selected-node');
+    });
+    selectedNodes.clear();
+  }
+});
+
+document.addEventListener('mousedown', function(e) {
+  ///////////////////////////////////////////////////////////////////
+  // Start multi-node drag if in select mode
+  ///////////////////////////////////////////////////////////////////
+  if (!selectMode) return;
+  // Only start drag if clicking a selected node
+  const svg = document.getElementById('map');
+  const target = e.target.closest('.node');
+  if (target && selectedNodes.has(target.id)) {
+    // Record initial positions and mouse offset
+    multiDrag = {
+      startX: e.clientX,
+      startY: e.clientY,
+      nodes: Array.from(selectedNodes).map(name => {
+        const node = mapData.nodes[name];
+        return {
+          name,
+          x: node.position.x,
+          y: node.position.y
+        };
+      })
+    };
+    e.preventDefault();
+  }
+});
 
 fetchConfigFiles();
 LoadAndDraw();

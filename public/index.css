@@ -35,3 +35,7 @@ background: #e0eaff;
 body {
 padding-top: 48px; /* Prevent content under the menu */
 }
+.selected-node rect, .selected-node image {
+  stroke: #FF4136 !important;
+  stroke-width: 3 !important;
+}
